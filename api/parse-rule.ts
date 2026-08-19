@@ -6,7 +6,7 @@
  */
 
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import { ModelBusyError, NotConfiguredError, parseRuleFromText } from './_parseRule'
+import { ModelBusyError, NotConfiguredError, parseRuleFromText } from './_parseRule.js'
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') {

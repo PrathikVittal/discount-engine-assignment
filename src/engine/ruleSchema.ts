@@ -12,7 +12,7 @@
  */
 
 import { z } from 'zod'
-import type { DiscountRule } from './types'
+import type { DiscountRule } from './types.js'
 
 /** A rule as parsed from natural language — no `ruleId` yet, the app assigns that. */
 export const parsedRuleSchema = z
