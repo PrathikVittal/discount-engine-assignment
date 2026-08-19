@@ -94,7 +94,7 @@ ARCHITECTURE.md           design rationale and the full tradeoff table
 
 ## Decisions worth flagging
 
-Full reasoning for each is in [ARCHITECTURE.md](ARCHITECTURE.md); the short version:
+Full reasoning for each is in [ARCHITECTURE.md](ARCHITECTURE.md) — including [§9, where I'd push back on the brief](ARCHITECTURE.md#9-where-id-push-back-on-the-brief) (the PDF format assumption, the read-only confirmation card, dead-ending an ambiguous parse, and "a backend is optional"). The short version:
 
 - **Rounding — to the nearest rupee after every discount step.** The brief mixes Rs.194.85 with a Rs.1,104 result. Rounding once at the end doesn't reproduce the brief's own figures for ITEM-02 or the cart total; rounding per step reproduces all of them.
 - **A serverless function for the LLM call, not a browser fetch.** This is the one deliberate departure from "no backend needed". A Vite app ships its whole bundle to the client, so an API key embedded there is readable from the network tab. `api/parse-rule.ts` keeps it server-side; the same module is mounted in the Vite dev server so `npm run dev` behaves identically to production.

@@ -236,7 +236,33 @@ To avoid the usual cost of that decision — a dev setup that behaves differentl
 
 **The PDF format assumption.** The brief specifies a `Product / Brand / Platform / Base Price` table with no item ids, so ids are assigned in reading order (`ITEM-01`…). The adapter accepts common header synonyms (Item/Description, Marketplace, Amount/MRP), skips decorative rules and `Order #`/`Total` lines, and handles `Rs.` / `₹` / `1,299` price formats. It does not attempt OCR — a scanned image of an invoice has no text layer, and silently returning an empty cart would be worse than saying so.
 
-## 9. What I'd do next
+## 9. Where I'd push back on the brief
+
+The brief invites disagreement, so here are the four places I'd argue for a different call. Two I acted on; two I left alone deliberately and would change given more scope.
+
+**1. PDF is the wrong interchange format for a cart — and the sample understates the problem.** *(acted on, partially)*
+
+The specified format is a clean text table, and the parser handles it (§8). But the assumption that a cart PDF *has a text layer* is the fragile part, and it's the common case that breaks: an invoice forwarded from a phone, a scan, or an export that rasterises the table produces zero extractable glyphs. The adapter says so explicitly rather than returning an empty cart, which is the right failure — but it's still a failure.
+
+If cart import matters, the ordering should be inverted: a structured export (CSV/JSON) as the primary path, PDF as the lossy fallback it actually is. Where PDF is genuinely unavoidable, the better fallback is the LLM already in this stack — hand it the raw text runs and let it infer the table, instead of my coordinate-clustering heuristic. Coordinate anchoring is more predictable and needs no API key, which is why it's the default here; but it assumes a header row exists and that columns don't wrap, and both assumptions fail on real invoices. The honest summary: this parser is correct for the specified format and brittle outside it, and I'd rather say that than imply it generalises.
+
+**2. An unresolvable parse should not be a dead end.** *(would change)*
+
+The brief says ambiguous input should "surface as unresolvable, ask the user to be more specific," and that's what happens. But "give a discount for big orders" isn't *nothing* — the model understood scope and intent, and only the value and threshold are missing. Discarding a 60%-complete parse and returning the merchant to an empty text box throws away work they'll now redo by hand.
+
+The better design returns the partial rule and renders the confirmation card with the understood fields filled in and the missing ones flagged as required. The merchant types "5000" once instead of rewriting the sentence and re-rolling the model. I kept the dead end because it's what the brief specifies and it's unambiguously safe — nothing half-parsed can reach the cart — but it's the weaker product.
+
+**3. The confirmation card should be editable, not read-only.** *(would change)*
+
+Covered in §7: I agree with having a confirmation step, and disagree with it being read-only. A near-miss parse — "Flipkart" classified as a brand rather than a platform — currently costs a full retype for a one-field fix. Editable fields keep the human approval boundary exactly where it is while removing the main reason to distrust it. I left it read-only so the trust model stays legible in a demo: what you confirm is byte-for-byte what the model returned.
+
+**4. "A backend is optional" — for this feature it isn't.** *(acted on)*
+
+Argued in full in §7. A Vite app ships its bundle to the browser, so a client-side LLM call means a key anyone can lift from the network tab. Calling that optional is only true if the key is disposable. One serverless function, no state, no discount logic.
+
+**And one place the brief's own numbers disagree with each other:** the worked example mixes an unrounded Rs.194.85 with a rounded Rs.1,104 result. Rounding once at the end doesn't reproduce the brief's figures for ITEM-02 or the cart total; rounding after each discount step reproduces all of them. §5 has the arithmetic. I matched the brief's outputs rather than its intermediate notation.
+
+## 10. What I'd do next
 
 - **Editable confirmation fields**, per §7 — the highest-value follow-up.
 - **Rule management in the UI** — deleting or toggling a rule added by mistake currently means reloading the CSV.
