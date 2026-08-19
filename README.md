@@ -20,7 +20,7 @@ Open http://localhost:5173, upload `sample-data/rules.csv` and `sample-data/cart
 >
 > If you hit a rate limit, the app says so explicitly and tells you how long to wait rather than failing silently.
 
-Other commands: `npm test` (47 engine + adapter tests), `npm run typecheck`, `npm run build`.
+Other commands: `npm test` (50 engine + adapter tests), `npm run typecheck`, `npm run build`.
 
 A second, larger dataset is included — `sample-data/rules1.csv` (15 rules) with `sample-data/sample-cart-30.pdf` (30 items). It exercises combinations the six-item sample can't: two competing platform rules on one item, two stackable rules on one item, and two cart rules qualifying simultaneously.
 

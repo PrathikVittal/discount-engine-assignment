@@ -1,7 +1,7 @@
 /**
  * parse-rule.ts — POST /api/parse-rule
  *
- * The only server-side piece of this app. It exists purely so the Anthropic API
+ * The only server-side piece of this app. It exists purely so the OpenAI API
  * key stays out of the browser bundle; it holds no state and no discount logic.
  */
 
