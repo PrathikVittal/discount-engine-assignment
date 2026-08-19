@@ -2,7 +2,7 @@
 
 A customer-facing cart pricing engine. Brands and platforms run competing discounts; for each item the engine applies the rule giving the **largest rupee saving**, stacks any stackable rule on top, then applies cart-wide offers as a separate line — and explains every price in plain language.
 
-**Live demo:** _<!-- TODO: paste your Vercel/Netlify URL here before submitting -->_
+**Live demo:** https://discount-engine-assignment-dte7.vercel.app/
 
 ## Run locally
 
