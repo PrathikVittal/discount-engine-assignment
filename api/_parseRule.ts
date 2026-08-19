@@ -18,7 +18,7 @@
 import OpenAI from 'openai'
 import { zodTextFormat } from 'openai/helpers/zod'
 import { z } from 'zod'
-import { describeIssues, parsedRuleSchema, type ParseResponse } from '../src/engine/ruleSchema'
+import { describeIssues, parsedRuleSchema, type ParseResponse } from '../src/engine/ruleSchema.js'
 
 /** Overridable so the model can be changed without a code edit. */
 const MODEL = process.env.OPENAI_MODEL ?? 'gpt-5.1'
