@@ -2,19 +2,25 @@
 
 A customer-facing cart pricing engine. Brands and platforms run competing discounts; for each item the engine applies the rule giving the **largest rupee saving**, stacks any stackable rule on top, then applies cart-wide offers as a separate line — and explains every price in plain language.
 
-**Live demo:** https://discount-engine-assignment-dte7.vercel.app/
+## Live demo
 
-## Run locally
+**https://discount-engine-assignment-dte7.vercel.app/**
+
+## Run locally — 3 steps
+
+**1. Install**
 
 ```bash
 npm install
 ```
 
+**2. Start**
+
 ```bash
 npm run dev
 ```
 
-Open http://localhost:5173, upload `sample-data/rules.csv` and `sample-data/cart.csv`, then click **Calculate Discounts**.
+**3. Open http://localhost:5173**, upload `sample-data/rules.csv` and `sample-data/cart.csv`, then click **Calculate Discounts**. You should see a final cart total of **Rs.5,339**.
 
 > For the natural-language rule input (Task 2), copy `.env.example` to `.env` and add an `OPENAI_API_KEY` (platform.openai.com/api-keys). Everything else — CSV, PDF, the engine itself — runs without a key.
 >
@@ -92,9 +98,24 @@ ARCHITECTURE.md           design rationale and the full tradeoff table
 
 **PDF** — upload a cart PDF with a `Product / Brand / Platform / Base Price` table. It replaces the cart and the engine re-runs immediately. Try `sample-data/sample-cart.pdf`, and `sample-cart-malformed.pdf` to see damaged rows reported individually while the good rows still load.
 
+
+## Where I'd push back on the brief
+
+The ground rules invite disagreement, so here are four. Two I acted on; two I left as specified and would change given more scope. Full argument in [ARCHITECTURE.md §9](ARCHITECTURE.md#9-where-id-push-back-on-the-brief).
+
+**1. PDF is the wrong interchange format for a cart** — *acted on, partially.* The parser handles the specified table, but the fragile assumption isn't malformed rows, it's that the PDF has a text layer at all. A scan or a phone photo of an invoice yields zero extractable glyphs. If cart import matters, the ordering should invert: structured export (CSV/JSON) as the primary path, PDF as the lossy fallback it actually is — and where PDF is unavoidable, the LLM already in this stack is a better extractor than my coordinate-clustering heuristic. This parser is correct for the specified format and brittle outside it.
+
+**2. An unresolvable parse shouldn't be a dead end** — *would change.* "Give a discount for big orders" isn't nothing: scope and intent were understood, only value and threshold are missing. Discarding a 60%-complete parse sends the merchant back to an empty box to redo work. Better: return the partial rule, render the confirmation card with understood fields filled and missing ones flagged. I kept the dead end because it's what the brief specifies and nothing half-parsed can reach the cart — but it's the weaker product.
+
+**3. The confirmation card should be editable, not read-only** — *would change.* I agree with having a confirmation step and disagree with it being read-only. A near-miss parse — "Flipkart" classified as brand rather than platform — costs a full retype for a one-field fix. Editable fields keep the human approval boundary exactly where it is. Left read-only here so the trust model stays legible: what you confirm is byte-for-byte what the model returned.
+
+**4. "A backend is optional" — for this feature it isn't** — *acted on.* A Vite app ships its bundle to the browser, so a client-side LLM call means an API key anyone can lift from the network tab. Calling that optional is only true if the key is disposable. The answer is one serverless function holding no state and no discount logic.
+
+**And one place the brief disagrees with itself:** the worked example mixes an unrounded Rs.194.85 with a rounded Rs.1,104 result. Rounding once at the end doesn't reproduce the brief's own figures for ITEM-02 or the cart total; rounding after each step reproduces all of them. I matched its outputs rather than its notation.
+
 ## Decisions worth flagging
 
-Full reasoning for each is in [ARCHITECTURE.md](ARCHITECTURE.md) — including [§9, where I'd push back on the brief](ARCHITECTURE.md#9-where-id-push-back-on-the-brief) (the PDF format assumption, the read-only confirmation card, dead-ending an ambiguous parse, and "a backend is optional"). The short version:
+Full reasoning for each is in [ARCHITECTURE.md](ARCHITECTURE.md); the short version:
 
 - **Rounding — to the nearest rupee after every discount step.** The brief mixes Rs.194.85 with a Rs.1,104 result. Rounding once at the end doesn't reproduce the brief's own figures for ITEM-02 or the cart total; rounding per step reproduces all of them.
 - **A serverless function for the LLM call, not a browser fetch.** This is the one deliberate departure from "no backend needed". A Vite app ships its whole bundle to the client, so an API key embedded there is readable from the network tab. `api/parse-rule.ts` keeps it server-side; the same module is mounted in the Vite dev server so `npm run dev` behaves identically to production.
