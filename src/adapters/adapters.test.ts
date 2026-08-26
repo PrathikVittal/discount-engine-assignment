@@ -6,8 +6,14 @@
  * a bad row must be reported and skipped, never crash and never silently pass
  * through to the engine.
  *
- * The PDF adapter isn't covered here — it needs a real browser (pdf.js worker,
- * File API); it's verified against `sample-data/sample-cart*.pdf` in the app.
+ * The PDF, XLSX and DOCX adapters aren't covered here — each needs a real
+ * browser (pdf.js worker, File API, DOMParser); they're verified against the
+ * files in `sample-data/` in the app.
+ *
+ * What they all share *is* covered: every one of them reduces its input to a
+ * table and hands it to `tableToCart`, which holds the column matching, price
+ * parsing and row validation. Testing it directly covers the logic that would
+ * otherwise be untested in three separate browser-only adapters.
  */
 
 import { describe, expect, it } from 'vitest'
@@ -15,6 +21,7 @@ import { parseCartCsv } from './csv/csvCartAdapter'
 import { parseRulesCsv } from './csv/csvRulesAdapter'
 import { parseAdditionalCartDiscount } from './llm/llmRuleAdapter'
 import { parsedRuleSchema, toDiscountRule } from '../engine/ruleSchema'
+import { tableToCart } from './table/tableToCart'
 
 describe('csvRulesAdapter', () => {
   it('parses the four sample rules, cart rule included', () => {
@@ -203,5 +210,145 @@ describe('additional cart discount wording', () => {
 
   it('does not reinterpret a general percentage offer as an additional cart discount', () => {
     expect(parseAdditionalCartDiscount('20% off on Flipkart', 'RULE-05')).toBeNull()
+  })
+})
+
+
+describe('tableToCart — the shared PDF / XLSX / DOCX mapper', () => {
+  const header = ['Product', 'Brand', 'Platform', 'Base Price']
+  const sample = [
+    header,
+    ['Cushion Cover', 'Natura Casa', 'Amazon India', 'Rs.1,299'],
+    ['Bed Sheet Set', 'Natura Casa', 'Flipkart', 'Rs.849'],
+    ['Wall Shelf', 'LivSpace Pro', 'Amazon India', 'Rs.599'],
+    ['Ceramic Vase', 'LivSpace Pro', 'Noon', 'Rs.2,499'],
+    ['Cutting Board', 'Nordic Basics', 'Amazon India', 'Rs.449'],
+    ['Desk Organiser', 'Nordic Basics', 'Flipkart', 'Rs.899'],
+  ]
+
+  it('maps the brief’s six-item table', () => {
+    const { data, errors } = tableToCart(sample)
+
+    expect(errors).toEqual([])
+    expect(data).toHaveLength(6)
+    expect(data[0]).toEqual({
+      itemId: 'ITEM-01',
+      product: 'Cushion Cover',
+      brand: 'Natura Casa',
+      platform: 'Amazon India',
+      basePrice: 1299,
+    })
+    expect(data.map((item) => item.basePrice)).toEqual([1299, 849, 599, 2499, 449, 899])
+  })
+
+  it('assigns item ids in reading order, since none of these formats carry one', () => {
+    const { data } = tableToCart(sample)
+    expect(data.map((item) => item.itemId)).toEqual([
+      'ITEM-01', 'ITEM-02', 'ITEM-03', 'ITEM-04', 'ITEM-05', 'ITEM-06',
+    ])
+  })
+
+  it('continues numbering from startIndex, so page 2 does not restart at ITEM-01', () => {
+    const { data } = tableToCart(sample, { startIndex: 6 })
+    expect(data[0]!.itemId).toBe('ITEM-07')
+    expect(data[5]!.itemId).toBe('ITEM-12')
+  })
+
+  it('accepts header synonyms — Item / Marketplace / Amount', () => {
+    const { data, errors } = tableToCart([
+      ['Item', 'Brand', 'Marketplace', 'Amount'],
+      ['Wall Shelf', 'LivSpace Pro', 'Amazon India', '599'],
+    ])
+
+    expect(errors).toEqual([])
+    expect(data[0]).toMatchObject({ product: 'Wall Shelf', platform: 'Amazon India', basePrice: 599 })
+  })
+
+  it('reads columns by position, not by guessing at each value', () => {
+    // "Noon" in the brand column is a platform name — position must still win.
+    const { data } = tableToCart([header, ['Vase', 'Noon', 'Flipkart', '100']])
+    expect(data[0]).toMatchObject({ brand: 'Noon', platform: 'Flipkart' })
+  })
+
+  it('handles Rs. / ₹ / thousands separators / decimals', () => {
+    const { data } = tableToCart([
+      header,
+      ['A', 'B', 'C', 'Rs.1,299'],
+      ['D', 'E', 'F', '₹849'],
+      ['G', 'H', 'I', '1,299.00'],
+      ['J', 'K', 'L', '599'],
+    ])
+    expect(data.map((item) => item.basePrice)).toEqual([1299, 849, 1299, 599])
+  })
+
+  it('names a row with a missing column and keeps the rest of the cart', () => {
+    const { data, errors } = tableToCart([
+      header,
+      ['Cushion Cover', 'Natura Casa', 'Amazon India', 'Rs.1,299'],
+      ['Bed Sheet Set', 'Natura Casa', '', 'Rs.849'],
+      ['Wall Shelf', 'LivSpace Pro', 'Amazon India', 'Rs.599'],
+    ])
+
+    expect(data).toHaveLength(2)
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('missing platform')
+    expect(errors[0]).toContain('Bed Sheet Set')
+    // The survivors renumber contiguously rather than leaving a gap.
+    expect(data.map((item) => item.itemId)).toEqual(['ITEM-01', 'ITEM-02'])
+  })
+
+  it('names a row whose price cannot be read and keeps the rest', () => {
+    const { data, errors } = tableToCart([
+      header,
+      ['Cushion Cover', 'Natura Casa', 'Amazon India', 'Rs.TBD'],
+      ['Wall Shelf', 'LivSpace Pro', 'Amazon India', 'Rs.599'],
+    ])
+
+    expect(data).toHaveLength(1)
+    expect(errors[0]).toContain("isn't a valid price")
+    expect(errors[0]).toContain('Rs.TBD')
+  })
+
+  it('rejects a zero or negative price rather than pricing an item at nothing', () => {
+    const { data, errors } = tableToCart([header, ['A', 'B', 'C', '0']])
+    expect(data).toEqual([])
+    expect(errors[0]).toContain("isn't a valid price")
+  })
+
+  it('drops dividers, order metadata and total rows', () => {
+    const { data, errors } = tableToCart([
+      ['Order #OP-9921', '', '', ''],
+      header,
+      ['──────', '──────', '──────', '──────'],
+      ['Cushion Cover', 'Natura Casa', 'Amazon India', 'Rs.1,299'],
+      ['', '', '', ''],
+      ['Total', '', '', 'Rs.1,299'],
+    ])
+
+    expect(data).toHaveLength(1)
+    expect(errors).toEqual([])
+  })
+
+  it('reports a table with no recognisable header instead of guessing', () => {
+    const { data, errors } = tableToCart([
+      ['Cushion Cover', 'Natura Casa', 'Amazon India', 'Rs.1,299'],
+    ])
+
+    expect(data).toEqual([])
+    expect(errors[0]).toContain('No item table found')
+    expect(errors[0]).toContain('Product, Brand, Platform, Base Price')
+  })
+
+  it('says where a row came from when the caller provides context', () => {
+    const { errors } = tableToCart([header, ['A', 'B', 'C', 'nope']], {
+      where: ' (sheet "Cart")',
+    })
+    expect(errors[0]).toContain('(sheet "Cart")')
+  })
+
+  it('tolerates short rows without throwing', () => {
+    const { data, errors } = tableToCart([header, ['Cushion Cover', 'Natura Casa']])
+    expect(data).toEqual([])
+    expect(errors[0]).toContain('missing')
   })
 })

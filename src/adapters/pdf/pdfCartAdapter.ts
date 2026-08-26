@@ -15,13 +15,15 @@
  * Reading columns from the header rather than splitting on whitespace is what
  * makes multi-word values ("Natura Casa", "Amazon India") survive intact.
  *
- * A row that can't be read is reported and skipped — one bad line never costs
- * the user the rest of their cart.
+ * Once lines are rebuilt into cells, interpretation is handed to the shared
+ * table mapper — so a PDF, a spreadsheet and a Word table all inherit the same
+ * column aliases, price handling and per-row error wording.
  */
 
 import * as pdfjs from 'pdfjs-dist'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import type { AdapterResult, CartItem } from '../../engine/types'
+import { COLUMNS, HEADER_ALIASES, tableToCart, type Column } from '../table/tableToCart'
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl
 
@@ -33,17 +35,6 @@ interface TextRun {
 
 /** Text runs whose baselines are within this many points count as one line. */
 const LINE_TOLERANCE = 3
-
-const COLUMNS = ['product', 'brand', 'platform', 'price'] as const
-type Column = (typeof COLUMNS)[number]
-
-/** Header labels we accept for each column, lowercased. */
-const HEADER_ALIASES: Record<Column, string[]> = {
-  product: ['product', 'item', 'description'],
-  brand: ['brand'],
-  platform: ['platform', 'marketplace', 'channel'],
-  price: ['base price', 'price', 'amount', 'mrp'],
-}
 
 async function extractRuns(file: File): Promise<TextRun[][]> {
   const loadingTask = pdfjs.getDocument({ data: await file.arrayBuffer() })
@@ -144,21 +135,6 @@ function splitByColumns(line: TextRun[], anchors: Map<Column, number>): Record<C
   }
 }
 
-/** "Rs.1,299" / "₹1299" / "1,299.00" → 1299 */
-function parsePrice(raw: string): number | null {
-  const digits = raw.replace(/(rs\.?|inr|₹)/gi, '').replace(/[,\s]/g, '')
-  if (!/^\d+(\.\d+)?$/.test(digits)) return null
-  const value = Number(digits)
-  return Number.isFinite(value) && value > 0 ? Math.round(value) : null
-}
-
-/** Lines that are decoration or totals rather than cart items. */
-function isNoiseLine(cells: Record<Column, string>, joined: string): boolean {
-  if (/^[\s─—–_=|+.-]*$/.test(joined)) return true // rule/divider lines
-  if (/^(order|date|invoice|total|subtotal|grand total|qty|page)\b/i.test(joined.trim())) return true
-  return !cells.product && !cells.brand && !cells.platform
-}
-
 export async function parseCartPdf(file: File): Promise<AdapterResult<CartItem>> {
   let pages: TextRun[][]
 
@@ -183,34 +159,24 @@ export async function parseCartPdf(file: File): Promise<AdapterResult<CartItem>>
     sawHeader = true
     const where = pages.length > 1 ? ` (page ${pageIndex + 1})` : ''
 
-    for (const line of lines.slice(header.index + 1)) {
-      const joined = line.map((run) => run.text).join(' ')
-      const cells = splitByColumns(line, header.anchors)
+    // Hand the reconstructed cells to the shared mapper as a plain table: a
+    // synthetic header row (the anchors already told us the column order) plus
+    // one row per line. Interpretation and error wording are then identical
+    // across PDF, spreadsheet and Word.
+    const table: string[][] = [
+      [...COLUMNS],
+      ...lines
+        .slice(header.index + 1)
+        .map((line) => {
+          const cells = splitByColumns(line, header.anchors)
+          return COLUMNS.map((column) => cells[column])
+        }),
+    ]
 
-      if (isNoiseLine(cells, joined)) continue
-
-      const missing = COLUMNS.filter((column) => !cells[column])
-      if (missing.length > 0) {
-        errors.push(`Skipped "${joined.trim()}"${where} — missing ${missing.join(', ')}.`)
-        continue
-      }
-
-      const basePrice = parsePrice(cells.price)
-      if (basePrice === null) {
-        errors.push(`Skipped "${joined.trim()}"${where} — "${cells.price}" isn't a valid price.`)
-        continue
-      }
-
-      data.push({
-        // The PDF format in the brief carries no item ids, so they're assigned
-        // in reading order to keep the results table stable and referable.
-        itemId: `ITEM-${String(data.length + 1).padStart(2, '0')}`,
-        product: cells.product,
-        brand: cells.brand,
-        platform: cells.platform,
-        basePrice,
-      })
-    }
+    // Item ids continue across pages rather than restarting at ITEM-01.
+    const page = tableToCart(table, { where, startIndex: data.length })
+    data.push(...page.data)
+    errors.push(...page.errors)
   }
 
   if (!sawHeader) {

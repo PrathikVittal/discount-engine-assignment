@@ -13,7 +13,13 @@ flowchart LR
     subgraph Adapters["Input adapters — swappable, independent"]
         CSV["csv/<br/>rules.csv, cart.csv"]
         PDF["pdf/<br/>cart PDF (pdf.js)"]
+        XLS["xlsx/<br/>cart .xlsx (SheetJS)"]
+        DOC["docx/<br/>cart .docx (mammoth)"]
         LLM["llm/<br/>plain English → /api/parse-rule"]
+    end
+
+    subgraph Table["Shared table mapper"]
+        T["tableToCart()<br/>cells → CartItem[]"]
     end
 
     subgraph Contract["The contract"]
@@ -30,7 +36,10 @@ flowchart LR
     end
 
     CSV --> C
-    PDF --> C
+    PDF --> T
+    XLS --> T
+    DOC --> T
+    T --> C
     LLM --> C
     C --> A
     A --> E
@@ -42,7 +51,11 @@ Two rules enforce the boundary:
 1. **The engine never imports an adapter.** `src/engine/` has exactly one non-type import (`zod`, for the shared rule schema). It cannot reach the network or the DOM.
 2. **Adapters never import each other or the engine's logic** — only its types.
 
-`src/App.tsx` is the sole module aware that three input paths exist. A fourth mode (barcode scan, an ERP webhook, a paste-a-table box) is one new adapter file plus one UI control; `discountEngine.ts` and its tests are untouched.
+`src/App.tsx` is the sole module aware that the input paths exist — and since the Excel/Word work it does not even hold the list: `src/adapters/cartFormats.ts` is a registry mapping file extension to loader, and `App.tsx` just asks it which adapter to use.
+
+**This claim has since been tested rather than asserted.** Adding `.xlsx` and `.docx` cart upload (§10) touched no file in `src/engine/`, changed no engine test, and required no change to `FileDropzone`. A fifth format is now one entry in `CART_FORMATS`.
+
+Two of the three table formats also share more than the contract. A PDF, a spreadsheet and a Word table all reduce to a header row plus data rows, so *interpretation* — which column is which, what counts as a price, which lines are noise — lives once in `adapters/table/tableToCart.ts`. Each adapter's remaining job is only to produce `string[][]`. That is why the Excel adapter is ~55 lines and the Word one ~65.
 
 ## 2. Data model
 
@@ -234,6 +247,8 @@ To avoid the usual cost of that decision — a dev setup that behaves differentl
 
 **Reconstructing the PDF table.** A PDF has no rows or columns, only glyphs at coordinates. Text runs are grouped into lines by y-coordinate, then the header row's x-positions define the columns and every run is assigned to the nearest one. Splitting on whitespace instead would break "Natura Casa" and "Amazon India" into fragments; anchoring on the header keeps multi-word values intact and tolerates changes in column spacing.
 
+**The spreadsheet and document assumptions.** XLSX reads the first sheet; DOCX reads the first table that yields items. Both accept the same header synonyms and price formats as the PDF path, because all three share `tableToCart`. Neither evaluates formulas — the cached formatted value is read, which is what Excel stores anyway. See §10 for the full requirements and risks.
+
 **The PDF format assumption.** The brief specifies a `Product / Brand / Platform / Base Price` table with no item ids, so ids are assigned in reading order (`ITEM-01`…). The adapter accepts common header synonyms (Item/Description, Marketplace, Amount/MRP), skips decorative rules and `Order #`/`Total` lines, and handles `Rs.` / `₹` / `1,299` price formats. It does not attempt OCR — a scanned image of an invoice has no text layer, and silently returning an empty cart would be worse than saying so.
 
 ## 9. Where I'd push back on the brief
@@ -244,7 +259,7 @@ The brief invites disagreement, so here are the four places I'd argue for a diff
 
 The specified format is a clean text table, and the parser handles it (§8). But the assumption that a cart PDF *has a text layer* is the fragile part, and it's the common case that breaks: an invoice forwarded from a phone, a scan, or an export that rasterises the table produces zero extractable glyphs. The adapter says so explicitly rather than returning an empty cart, which is the right failure — but it's still a failure.
 
-If cart import matters, the ordering should be inverted: a structured export (CSV/JSON) as the primary path, PDF as the lossy fallback it actually is. Where PDF is genuinely unavoidable, the better fallback is the LLM already in this stack — hand it the raw text runs and let it infer the table, instead of my coordinate-clustering heuristic. Coordinate anchoring is more predictable and needs no API key, which is why it's the default here; but it assumes a header row exists and that columns don't wrap, and both assumptions fail on real invoices. The honest summary: this parser is correct for the specified format and brittle outside it, and I'd rather say that than imply it generalises.
+If cart import matters, the ordering should be inverted: a structured export (CSV/JSON) as the primary path, PDF as the lossy fallback it actually is. **Adding `.xlsx` support (§10) is that argument acted on** — a spreadsheet carries real rows and columns, so the Excel adapter needs no coordinate reconstruction at all and is roughly a quarter the size of the PDF one. The comparison is the point: the same six items take ~55 lines to read from Excel and ~230 from PDF, for a strictly less reliable result. Where PDF is genuinely unavoidable, the better fallback is the LLM already in this stack — hand it the raw text runs and let it infer the table, instead of my coordinate-clustering heuristic. Coordinate anchoring is more predictable and needs no API key, which is why it's the default here; but it assumes a header row exists and that columns don't wrap, and both assumptions fail on real invoices. The honest summary: this parser is correct for the specified format and brittle outside it, and I'd rather say that than imply it generalises.
 
 **2. An unresolvable parse should not be a dead end.** *(would change)*
 
@@ -262,7 +277,79 @@ Argued in full in §7. A Vite app ships its bundle to the browser, so a client-s
 
 **And one place the brief's own numbers disagree with each other:** the worked example mixes an unrounded Rs.194.85 with a rounded Rs.1,104 result. Rounding once at the end doesn't reproduce the brief's figures for ITEM-02 or the cart total; rounding after each discount step reproduces all of them. §5 has the arithmetic. I matched the brief's outputs rather than its intermediate notation.
 
-## 10. What I'd do next
+## 10. PRD — Excel and Word cart upload
+
+### Problem
+
+The cart accepts CSV and PDF. Neither matches how merchants actually hold cart data.
+
+A merchant's order list lives in a spreadsheet — that is where it is built, edited and shared. Getting it into this tool currently means *File → Save As → CSV* on every upload: a manual step, repeated, that silently drops formatting and multi-sheet structure. The alternative path, PDF, is worse: §9 already argues PDF is the wrong interchange format for a cart, because a PDF has no rows or columns and the table has to be reconstructed from glyph coordinates.
+
+Word matters for a narrower but real case: order confirmations and purchase orders circulated as `.docx`, where the items sit in a Word table someone would otherwise retype.
+
+### Goals
+
+- Accept `.xlsx` and `.docx` cart uploads alongside CSV and PDF.
+- Identical downstream behaviour to the existing formats: the cart is replaced, the engine re-runs against the active rules, and the same six-item sample produces the same **Rs.5,339**.
+- Row-level error reporting consistent with CSV and PDF — a bad row is named and skipped, never fatal.
+- **No engine changes.** The pricing logic must not learn that these formats exist.
+
+### Non-goals
+
+- **Legacy `.xls`** — a different binary format needing a separate parser, for a format Excel itself has deprecated. `.xlsx` covers current files.
+- **Multi-sheet selection** — the first sheet is used. Choosing between sheets needs UI that would have to be designed, not guessed at; the rule is stated in the error path instead.
+- **Formula evaluation** — cached formatted values are read, not recomputed. A spreadsheet whose prices are live formulas still works, because Excel stores the last computed value.
+- **Scanned or image-only documents** — no OCR. Out of scope for the same reason as PDF (§9).
+- **Writing files back out.** Import only.
+
+### User stories
+
+1. *As a merchant*, I upload the spreadsheet I already maintain and see priced results, without a CSV export step.
+2. *As a merchant*, I upload a `.docx` purchase order and its table becomes my cart.
+3. *As a merchant with one broken row*, I still get the other five items priced, and I am told exactly which row failed and why.
+4. *As a developer*, I add a fifth format by writing one adapter and one registry entry.
+
+### Functional requirements
+
+| # | Requirement |
+|---|---|
+| F1 | `.xlsx` and `.docx` are accepted by the cart dropzone and by drag-and-drop |
+| F2 | The table may carry the columns `Product`, `Brand`, `Platform`, `Base Price`, or the accepted synonyms (`Item`/`Description`, `Marketplace`/`Channel`, `Price`/`Amount`/`MRP`) |
+| F3 | Columns are resolved **by position** from the header row, so a value that looks like another column is not misfiled |
+| F4 | Preamble rows, dividers, and `Order #` / `Date` / `Total` rows are ignored |
+| F5 | Prices parse as `Rs.1,299`, `₹849`, `INR 2,499`, `1,299.00` or `599` |
+| F6 | XLSX reads the first sheet; DOCX reads the first table that yields items |
+| F7 | An unreadable row is reported by name and skipped; the rest of the cart loads |
+| F8 | A file with no recognisable table reports so, naming the expected columns |
+| F9 | A failed upload leaves the previously loaded cart intact |
+| F10 | Item ids are assigned in reading order, as neither format carries one |
+
+### Success criteria
+
+- `sample-cart.xlsx` and `sample-cart.docx` each produce the same six items and the same **Rs.5,339** as `cart.csv` and `sample-cart.pdf`. *Format equivalence is the headline test.*
+- The malformed variants name both damaged rows and still load the other four.
+- **Zero files changed under `src/engine/`**, and zero engine tests edited. This is the measurable form of the §1 claim.
+- Main bundle growth stays negligible — measured at **+1.45 kB** (251.53 → 252.98 kB); SheetJS and mammoth load only when such a file is opened.
+
+### Design
+
+Both formats are genuinely tabular, so neither needs the PDF's coordinate clustering. That exposed the real duplication: three formats were about to repeat the same column matching, price parsing and row validation.
+
+So interpretation moved into `adapters/table/tableToCart.ts`, and each adapter now only produces `string[][]`. The PDF adapter was refactored onto it too — it keeps its glyph clustering, then feeds the reconstructed cells through the same mapper. One consequence worth noting: `tableToCart` is pure and DOM-free, so it carries the test coverage for logic that is otherwise locked inside three browser-only adapters.
+
+Dispatch moved into `adapters/cartFormats.ts`, a registry of `{ id, extensions, load }`. `App.tsx` no longer branches on file type, and `FileDropzone` derives its `accept` attribute from the registry, so neither needs editing when a format is added.
+
+### Risks and tradeoffs
+
+**SheetJS ships from npm with two unpatched advisories** — prototype pollution ([GHSA-4r6h-8v6p-xvw6](https://github.com/advisories/GHSA-4r6h-8v6p-xvw6)) and ReDoS ([GHSA-5pgg-2g8v-p4x9](https://github.com/advisories/GHSA-5pgg-2g8v-p4x9)), both marked *no fix available*, because SheetJS moved current releases off npm to self-hosting and the npm build is frozen at 0.18.5 (2022).
+
+This was accepted deliberately rather than overlooked. The parse is client-side, in the user's own browser, on a file that user chose — the same trust boundary as the existing PDF path, and no different from the risk they take opening the file in Excel. Nothing parsed reaches a server, and the output is constrained to `CartItem[]` before it touches anything. The alternative, `exceljs`, unpacks to 21.8 MB against SheetJS's 7.5 MB, which is a poor trade for a browser bundle. **If this shipped to real merchants** the right move is pinning SheetJS ≥ 0.20 from its own CDN, which is versioned and patched — worth doing, and not worth a CDN dependency in an assignment.
+
+**Word tables vary far more in the wild than the sample.** Merged cells, nested tables and a header split across two rows all break the position-based mapping. The adapter scans for the first table that yields items rather than assuming table one, which handles the common letterhead case, but this is the weakest of the four inputs and is stated as such rather than presented as general.
+
+**Both libraries are large** — SheetJS 429 kB, mammoth ~490 kB. Mitigated by dynamic `import()`, matching the existing pdf.js treatment.
+
+## 11. What I'd do next
 
 - **Editable confirmation fields**, per §7 — the highest-value follow-up.
 - **Rule management in the UI** — deleting or toggling a rule added by mistake currently means reloading the CSV.

@@ -32,25 +32,27 @@ npm run dev
 >
 > If you hit a rate limit, the app says so explicitly and tells you how long to wait rather than failing silently.
 
-Other commands: `npm test` (50 engine + adapter tests), `npm run typecheck`, `npm run build`.
+Other commands: `npm test` (63 engine + adapter tests), `npm run typecheck`, `npm run build`.
 
 A second, larger dataset is included — `sample-data/rules1.csv` (15 rules) with `sample-data/sample-cart-30.pdf` (30 items). It exercises combinations the six-item sample can't: two competing platform rules on one item, two stackable rules on one item, and two cart rules qualifying simultaneously.
 
-## Architecture: one engine, three interchangeable adapters
+## Architecture: one engine, five interchangeable adapters
 
 The design constraint driving everything: **you can add a fourth input mode without touching the discount calculator.**
 
 ```
-  CSV adapter  ─┐
-  PDF adapter  ─┼──►  CartItem[] + DiscountRule[]  ──►  calculate()  ──►  results  ──►  UI
-  LLM adapter  ─┘         (the only contract)          (pure function)
+  CSV adapter   ─┐
+  PDF adapter   ─┤
+  XLSX adapter  ─┼──►  CartItem[] + DiscountRule[]  ──►  calculate()  ──►  results  ──►  UI
+  DOCX adapter  ─┤         (the only contract)          (pure function)
+  LLM adapter   ─┘
 ```
 
 - `src/engine/` is a **pure function**: `calculate(cart, rules)`. No I/O, no React, no knowledge of where its inputs came from. Same inputs always produce the same output.
-- `src/adapters/` holds three independent input paths. Each one's only job is to produce `CartItem[]` or `DiscountRule[]`, and each returns the same `{ data, errors }` shape so a malformed row is reported and skipped rather than fatal.
-- `src/App.tsx` is the only module that knows all three adapters exist.
+- `src/adapters/` holds five independent input paths, listed in one registry (`cartFormats.ts`) that maps a file extension to its loader. Each one's only job is to produce `CartItem[]` or `DiscountRule[]`, and each returns the same `{ data, errors }` shape so a malformed row is reported and skipped rather than fatal.
+- `src/App.tsx` is the only module that knows the adapters exist — and it doesn't hold the list, it asks the registry.
 
-Adding, say, a barcode scanner means writing one adapter file and one UI control. The engine and its tests stay untouched.
+Adding, say, a barcode scanner means writing one adapter file and adding one registry entry. **This has been tested, not just claimed:** adding Excel and Word support changed nothing under `src/engine/`, edited no engine test, and needed no change to the upload component.
 
 ```
 src/
@@ -60,9 +62,13 @@ src/
     ruleSchema.ts         Zod schema shared by the browser and the server
     discountEngine.test.ts
   adapters/
+    cartFormats.ts        the registry — extension → adapter, the only list
     csv/                  rules.csv + cart.csv
     llm/                  plain English → DiscountRule (calls /api/parse-rule)
-    pdf/                  cart PDF → CartItem[] (pdf.js, client-side, lazy-loaded)
+    pdf/                  cart PDF → CartItem[] (pdf.js, lazy-loaded)
+    xlsx/                 cart .xlsx → CartItem[] (SheetJS, lazy-loaded)
+    docx/                 cart .docx → CartItem[] (mammoth, lazy-loaded)
+    table/                tableToCart() — shared by pdf, xlsx and docx
     adapters.test.ts
   components/             presentational only
   App.tsx                 orchestration
@@ -96,13 +102,15 @@ ARCHITECTURE.md           design rationale and the full tradeoff table
 |         |          | RULE-04 — 10% off cart ≥ Rs.4,000          | −Rs.593      |
 |         |          | **Final cart total**                       | **Rs.5,339** |
 
-## The three input modes
+## The input modes
 
 **CSV** — `rules.csv` (`rule_id, scope, applies_to, type, value, stackable, min_cart_value`) and `cart.csv` (`item_id, product, brand, platform, base_price`). `scope` is `brand`, `platform`, or `cart`; cart rules leave `applies_to` blank, and `min_cart_value` is optional (blank = applies to every cart).
 
 **Natural language** — describe an offer in plain English; an LLM parses it into a `DiscountRule`, which is validated, shown for confirmation, and only applied when you accept it. Ambiguous input ("give a discount for big orders") comes back as unresolvable with a note on what's missing.
 
-**PDF** — upload a cart PDF with a `Product / Brand / Platform / Base Price` table. It replaces the cart and the engine re-runs immediately. Try `sample-data/sample-cart.pdf`, and `sample-cart-malformed.pdf` to see damaged rows reported individually while the good rows still load.
+**PDF, Excel and Word** — upload a cart as `.pdf`, `.xlsx` or `.docx` with a `Product / Brand / Platform / Base Price` table. It replaces the cart and the engine re-runs immediately. All three accept the same header synonyms (`Item`, `Marketplace`, `MRP`…) and price formats (`Rs.1,299`, `₹849`, `INR 2,499`, `1,299.00`), because they share one table mapper.
+
+Every format produces the identical **Rs.5,339** on the same six items — try `sample-cart.pdf`, `sample-cart.xlsx` and `sample-cart.docx`. The `-malformed` variants show damaged rows reported individually while the good rows still load, and `sample-cart-messy.xlsx` exercises a preamble, column synonyms and four different price formats at once.
 
 ## Where I'd push back on the brief
 

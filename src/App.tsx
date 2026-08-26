@@ -11,7 +11,7 @@
  */
 
 import { useMemo, useState } from 'react'
-import { parseCartCsv } from './adapters/csv/csvCartAdapter'
+import { CART_ACCEPT, CART_FORMAT_NAMES, formatFor, type CartFormat } from './adapters/cartFormats'
 import { parseRulesCsv } from './adapters/csv/csvRulesAdapter'
 import DataTable, { type Column } from './components/DataTable'
 import FileDropzone from './components/FileDropzone'
@@ -24,7 +24,8 @@ import type { CartItem, DiscountRule } from './engine/types'
 const rupees = (amount: number) => `Rs.${amount.toLocaleString('en-IN')}`
 
 /** Where a loaded set of data came from — shown so re-runs are traceable. */
-type Source = { label: string; via: 'CSV' | 'PDF' | 'Text' } | null
+/** Where the loaded data came from — a cart format id, or 'Text' for a rule typed by hand. */
+type Source = { label: string; via: CartFormat['id'] | 'Text' } | null
 
 const RULE_COLUMNS: Column<DiscountRule>[] = [
   { key: 'ruleId', label: 'Rule' },
@@ -101,23 +102,25 @@ export default function App() {
   }
 
   async function handleCartFile(file: File) {
+    // The only place the input format matters — look up an adapter, then forget
+    // it. Every format returns the same { data, errors }, so nothing below here
+    // (and nothing in the engine) knows which one ran.
+    const format = formatFor(file)
+    if (!format) {
+      setCartErrors([`"${file.name}" isn't a supported cart file. Use ${CART_FORMAT_NAMES}.`])
+      return
+    }
+
     setCartBusy(true)
     try {
-      const isPdf = file.name.toLowerCase().endsWith('.pdf')
-
-      // The only place the input format matters — pick an adapter, then forget it.
-      // The PDF adapter is imported on demand: pdf.js is ~1MB, and a user who
-      // only ever uploads CSV should never pay to download it.
-      const { data, errors } = isPdf
-        ? await (await import('./adapters/pdf/pdfCartAdapter')).parseCartPdf(file)
-        : parseCartCsv(await file.text())
+      const { data, errors } = await format.load(file)
 
       setCartErrors(errors)
       // Only replace the cart if something parsed; a failed upload shouldn't
       // silently empty a cart the user already had.
       if (data.length > 0) {
         setCart(data)
-        setCartSource({ label: file.name, via: isPdf ? 'PDF' : 'CSV' })
+        setCartSource({ label: file.name, via: format.id })
       }
     } finally {
       setCartBusy(false)
@@ -168,9 +171,9 @@ export default function App() {
           <section className="card">
             <h2 className="card-title">Cart Items</h2>
             <FileDropzone
-              label="cart.csv or cart.pdf"
-              description="Upload a cart — CSV or PDF"
-              accept=".csv,.pdf"
+              label="cart.csv, .pdf, .xlsx or .docx"
+              description={`Upload a cart — ${CART_FORMAT_NAMES}`}
+              accept={CART_ACCEPT}
               onFile={handleCartFile}
               loadedName={cartSource?.label}
               busy={cartBusy}
